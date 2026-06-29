@@ -20,19 +20,12 @@ rate_buckets: dict[str, deque] = defaultdict(deque)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # MIDDLEWARE 1 — Request-context propagator
-# Runs last (outermost call-next means it wraps everything)
 # ─────────────────────────────────────────────────────────────────────────────
 @app.middleware("http")
 async def request_context_middleware(request: Request, call_next):
-    # Reuse inbound X-Request-ID or mint a fresh UUID4
     request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
-
-    # Stash it so the endpoint can read it
     request.state.request_id = request_id
-
     response = await call_next(request)
-
-    # Always echo it back in the response header
     response.headers["X-Request-ID"] = request_id
     return response
 
@@ -44,13 +37,9 @@ async def request_context_middleware(request: Request, call_next):
 async def cors_middleware(request: Request, call_next):
     origin = request.headers.get("origin", "")
 
-    # Decide whether this origin is allowed
-    # Allow the assigned origin AND the exam/grader page origin
     allowed_origins = {
         ALLOWED_ORIGIN,
-        # Add the exam page origin so the browser-based grader can also reach /ping
-        # (Replace with the actual exam page URL if you know it, or leave as-is
-        #  and the server will only send ACAO for the two allowed origins)
+        "https://exam.sanand.workers.dev",
     }
 
     origin_allowed = origin in allowed_origins
@@ -83,7 +72,6 @@ async def cors_middleware(request: Request, call_next):
 # ─────────────────────────────────────────────────────────────────────────────
 @app.middleware("http")
 async def rate_limit_middleware(request: Request, call_next):
-    # Skip rate-limiting for preflight requests
     if request.method == "OPTIONS":
         return await call_next(request)
 
@@ -93,7 +81,6 @@ async def rate_limit_middleware(request: Request, call_next):
 
     bucket = rate_buckets[client_id]
 
-    # Drop timestamps outside the current window
     while bucket and bucket[0] < window_start:
         bucket.popleft()
 
@@ -111,7 +98,6 @@ async def rate_limit_middleware(request: Request, call_next):
     bucket.append(now)
     response = await call_next(request)
 
-    # Add helpful rate-limit headers
     response.headers["X-RateLimit-Limit"] = str(RATE_LIMIT_MAX)
     response.headers["X-RateLimit-Remaining"] = str(RATE_LIMIT_MAX - len(bucket))
     return response
