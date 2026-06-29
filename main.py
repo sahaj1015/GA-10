@@ -7,68 +7,16 @@ from fastapi.responses import JSONResponse
 # ── configuration ────────────────────────────────────────────────────────────
 EMAIL = "24f3005134@ds.study.iitm.ac.in"
 ALLOWED_ORIGIN = "https://app-6ro6fy.example.com"
-RATE_LIMIT_MAX = 14        # max requests per window
-RATE_LIMIT_WINDOW = 10     # seconds
+RATE_LIMIT_MAX = 14
+RATE_LIMIT_WINDOW = 10
 
-# ── app ───────────────────────────────────────────────────────────────────────
 app = FastAPI()
 
-# ── rate-limit state (in-memory) ──────────────────────────────────────────────
-# Maps client_id → deque of timestamps of recent requests
 rate_buckets: dict[str, deque] = defaultdict(deque)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# MIDDLEWARE 1 — Request-context propagator
-# ─────────────────────────────────────────────────────────────────────────────
-@app.middleware("http")
-async def request_context_middleware(request: Request, call_next):
-    request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
-    request.state.request_id = request_id
-    response = await call_next(request)
-    response.headers["X-Request-ID"] = request_id
-    return response
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# MIDDLEWARE 2 — Scoped CORS policy
-# ─────────────────────────────────────────────────────────────────────────────
-@app.middleware("http")
-async def cors_middleware(request: Request, call_next):
-    origin = request.headers.get("origin", "")
-
-    allowed_origins = {
-        ALLOWED_ORIGIN,
-        "https://exam.sanand.workers.dev",
-    }
-
-    origin_allowed = origin in allowed_origins
-
-    # Handle CORS preflight (OPTIONS)
-    if request.method == "OPTIONS":
-        headers = {
-            "Access-Control-Allow-Methods": "GET, OPTIONS",
-            "Access-Control-Allow-Headers": "X-Request-ID, X-Client-Id, Content-Type",
-            "Access-Control-Max-Age": "600",
-        }
-        if origin_allowed:
-            headers["Access-Control-Allow-Origin"] = origin
-        return JSONResponse(status_code=200, content={}, headers=headers)
-
-    # Normal request
-    response = await call_next(request)
-
-    if origin_allowed:
-        response.headers["Access-Control-Allow-Origin"] = origin
-        response.headers["Access-Control-Allow-Headers"] = (
-            "X-Request-ID, X-Client-Id, Content-Type"
-        )
-
-    return response
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# MIDDLEWARE 3 — Per-client rate limiter (sliding-window)
+# MIDDLEWARE 3 — Per-client rate limiter (defined first = runs last)
 # ─────────────────────────────────────────────────────────────────────────────
 @app.middleware("http")
 async def rate_limit_middleware(request: Request, call_next):
@@ -80,7 +28,6 @@ async def rate_limit_middleware(request: Request, call_next):
     window_start = now - RATE_LIMIT_WINDOW
 
     bucket = rate_buckets[client_id]
-
     while bucket and bucket[0] < window_start:
         bucket.popleft()
 
@@ -97,9 +44,58 @@ async def rate_limit_middleware(request: Request, call_next):
 
     bucket.append(now)
     response = await call_next(request)
-
     response.headers["X-RateLimit-Limit"] = str(RATE_LIMIT_MAX)
     response.headers["X-RateLimit-Remaining"] = str(RATE_LIMIT_MAX - len(bucket))
+    return response
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MIDDLEWARE 2 — Scoped CORS policy (defined second = runs second)
+# ─────────────────────────────────────────────────────────────────────────────
+@app.middleware("http")
+async def cors_middleware(request: Request, call_next):
+    origin = request.headers.get("origin", "")
+
+    allowed_origins = {
+        ALLOWED_ORIGIN,
+        "https://exam.sanand.workers.dev",
+    }
+
+    origin_allowed = origin in allowed_origins
+
+    if request.method == "OPTIONS":
+        headers = {
+            "Access-Control-Allow-Methods": "GET, OPTIONS",
+            "Access-Control-Allow-Headers": "X-Request-ID, X-Client-Id, Content-Type",
+            "Access-Control-Max-Age": "600",
+        }
+        if origin_allowed:
+            headers["Access-Control-Allow-Origin"] = origin
+        return JSONResponse(status_code=200, content={}, headers=headers)
+
+    response = await call_next(request)
+
+    if origin_allowed:
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Headers"] = (
+            "X-Request-ID, X-Client-Id, Content-Type"
+        )
+
+    return response
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MIDDLEWARE 1 — Request-context propagator (defined last = runs first)
+# ─────────────────────────────────────────────────────────────────────────────
+@app.middleware("http")
+async def request_context_middleware(request: Request, call_next):
+    request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+    request.state.request_id = request_id
+
+    response = await call_next(request)
+
+    # This must run outermost so it always sets the header
+    response.headers["X-Request-ID"] = request_id
     return response
 
 
